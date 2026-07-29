@@ -70,3 +70,7 @@ sudo bash install.sh
 ### Home
 
 ![Home](IMG_9053.png)
+
+### Settings
+
+![Settings] (IMG_9055.png)
