@@ -60,7 +60,7 @@ sudo bash install.sh
 
 ## 🖥️ Enclosure
 
-3D render of the VIGILIS Meteor enclosure.
+3D render of the VIGILIS Meteor enclosure. You can find all printed Parts in the Main Folder.
 
 ![VIGILIS Enclosure](dfd8aaf1-6358-4532-a5f2-4023c0bcdb8d.jpeg)
 
