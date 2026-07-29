@@ -34,8 +34,7 @@
 ## Supported Hardware
 
 ### Raspberry Pi
-- Raspberry Pi 4
-- Raspberry Pi 5
+- Raspberry Pi 4 (4GB recommended)
 
 ### Cameras
 - Sony IMX462 CSI (tested)
