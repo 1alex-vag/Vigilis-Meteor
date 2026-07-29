@@ -74,3 +74,11 @@ sudo bash install.sh
 ### Settings
 
 ![Settings](IMG_9055.png)
+
+### Events
+
+![Events](IMG_9058)
+
+### Diagnostics
+
+![Diagnostics](IMG_9057)
