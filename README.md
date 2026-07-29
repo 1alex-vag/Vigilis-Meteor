@@ -21,7 +21,6 @@
 - ⚡ Optimized for Raspberry Pi
 - 🔄 Automatic updates
 - 📊 Live system monitoring
-- 🌌 Timelapse, Startrails & Ketograms
 
 ## Installation
 
@@ -77,8 +76,8 @@ sudo bash install.sh
 
 ### Events
 
-![Events](IMG_9058)
+![Events](IMG_9058.png)
 
 ### Diagnostics
 
-![Diagnostics](IMG_9057)
+![Diagnostics](IMG_9057.png)
