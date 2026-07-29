@@ -50,3 +50,12 @@ VIGILIS Meteor is an open-source meteor detection software for Raspberry Pi, des
 The complete installation guide, hardware setup and troubleshooting manual can be found here:
 
 📄 [VIGILIS Documentation (PDF)](./VIGILIS%20DOCUMENTATION.pdf)
+
+common installation:
+git clone https://github.com/1alex-vag/Vigilis-Meteor.git
+
+cd Vigilis-Meteor
+
+sudo ./install.sh
+or
+sudo bash install.sh
