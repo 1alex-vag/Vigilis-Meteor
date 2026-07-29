@@ -31,4 +31,16 @@
 4. Open the web interface
 5. Enjoy 🙂
 
+## Supported Hardware
+
+### Raspberry Pi
+- Raspberry Pi 4
+- Raspberry Pi 5
+
+### Cameras
+- Sony IMX462 CSI (tested)
+- CSI Cameras
+- ZWO ASI Cameras
+- RTSP Cameras
+
 VIGILIS Meteor is an open-source meteor detection software for Raspberry Pi, designed for reliable 24/7 operation. It supports CSI, ZWO and RTSP cameras, offers automatic day/night settings, a responsive web interface, SSD/HDD recording and focuses on stability, image quality and detection accuracy.
