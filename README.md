@@ -23,4 +23,12 @@
 - 📊 Live system monitoring
 - 🌌 Timelapse, Startrails & Ketograms
 
+## Installation
+
+1. Flash Raspberry Pi OS Bookworm (64-bit)
+2. Download the latest VIGILIS release
+3. Run the installer
+4. Open the web interface
+5. Enjoy 🙂
+
 VIGILIS Meteor is an open-source meteor detection software for Raspberry Pi, designed for reliable 24/7 operation. It supports CSI, ZWO and RTSP cameras, offers automatic day/night settings, a responsive web interface, SSD/HDD recording and focuses on stability, image quality and detection accuracy.
