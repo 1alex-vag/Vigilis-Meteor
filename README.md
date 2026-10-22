@@ -107,9 +107,14 @@ VIGILIS Meteor features a modern, responsive web interface designed for desktop 
 
 The interface combines camera monitoring, astronomical information, event management, and hardware controls.
 
-### Dashboard Preview
+### Dashboard Preview Mobile WebUI
 
 ![VIGILIS Meteor Dashboard](VIGILIS-Meteor-Dashboard.jpg)
+
+### Dashboard Preview Desktop WebUI
+
+![VIGILIS Meteor Dashboard](VIGILIS-Meteor-Desktop.jpg)
+
 
 ### Home
 
