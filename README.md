@@ -116,6 +116,11 @@ The interface combines camera monitoring, astronomical information, event manage
 ![VIGILIS Meteor Dashboard](VIGILIS-Meteor-Desktop.jpg)
 
 
+### 📄 Wiring Diagrams
+
+**[View / Download VIGILIS AllSky Wiring Diagrams (PDF)](VIGILIS-Meteor-Wiring-Diagrams.pdf)**
+
+
 ### Home
 
 The Home dashboard provides real-time information about the observing station.
