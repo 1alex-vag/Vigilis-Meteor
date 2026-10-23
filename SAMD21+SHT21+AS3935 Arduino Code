@@ -1,0 +1,2184 @@
+#include <Wire.h>
+#include <Adafruit_SHT31.h>
+#include <DFRobot_AS3935_I2C.h>
+
+// ============================================================
+// VIGILIS Outdoor Sensor Node V2.1
+// XIAO SAMD21 + SHT31 + DFRobot Gravity AS3935
+//
+// SENSOR:
+// D2 = AS3935 IRQ
+// D4 = SDA -> SHT31 + AS3935
+// D5 = SCL -> SHT31 + AS3935
+//
+// RASPBERRY PI:
+// D6 / TX -> Raspberry Pi GPIO13 / physical Pin 33
+// D7 / RX <- Raspberry Pi GPIO26 / physical Pin 37
+//
+// USB Serial = 115200 baud
+// Pi UART    = 9600 baud
+// ============================================================
+
+
+// ============================================================
+// PIN CONFIG
+// ============================================================
+
+#define AS3935_IRQ_PIN D2
+#define PI_RX_PIN      D7
+
+
+// ============================================================
+// AS3935 CONSTANTS
+// ============================================================
+
+#define AS3935_I2C_ADDR AS3935_ADD3   // 0x03
+
+#define AS3935_INDOORS  0
+#define AS3935_OUTDOORS 1
+
+#define AS3935_DIST_DIS 0
+#define AS3935_DIST_EN  1
+
+
+// ============================================================
+// AS3935 DEFAULT SETTINGS
+// ============================================================
+//
+// Previously measured:
+//
+// 120 pF -> approx. 503.62 kHz
+//
+// Settings are NOT persistent yet.
+// After power cycle these defaults are restored.
+// ============================================================
+
+uint8_t as3935Capacitance = 120;
+
+uint8_t as3935Mode =
+  AS3935_OUTDOORS;
+
+uint8_t as3935Disturber =
+  AS3935_DIST_EN;
+
+uint8_t as3935NoiseFloor = 0;
+
+uint8_t as3935Watchdog = 1;
+
+uint8_t as3935Spike = 1;
+
+
+// ============================================================
+// STARTUP CONFIG
+// ============================================================
+//
+// IMPORTANT:
+// The 5 second delay fixes the reproducible AS3935
+// common cold-start problem.
+//
+// Tested:
+// XIAO + AS3935 powered simultaneously -> 3/3 successful.
+// ============================================================
+
+#define AS3935_POWERUP_DELAY_MS 5000
+
+#define AS3935_RETRY_DELAY_MS 2000
+
+#define AS3935_MAX_RETRIES 5
+
+
+// ============================================================
+// ENVIRONMENT CONFIG
+// ============================================================
+
+const unsigned long ENV_INTERVAL =
+  5000;
+
+unsigned long lastEnvironmentSend =
+  0;
+
+
+// ============================================================
+// SENSOR OBJECTS
+// ============================================================
+
+Adafruit_SHT31 sht31 =
+  Adafruit_SHT31();
+
+
+DFRobot_AS3935_I2C lightning(
+  (uint8_t)AS3935_IRQ_PIN,
+  (uint8_t)AS3935_I2C_ADDR
+);
+
+
+// ============================================================
+// SENSOR STATUS
+// ============================================================
+
+volatile bool as3935Interrupt =
+  false;
+
+
+bool sht31Online =
+  false;
+
+bool as3935Online =
+  false;
+
+bool sht31Heater =
+  false;
+
+
+// ============================================================
+// EVENT COUNTERS
+// ============================================================
+
+uint32_t lightningCount =
+  0;
+
+uint32_t emiEventCount =
+  0;
+
+uint32_t noiseCount =
+  0;
+
+uint32_t unknownIrqCount =
+  0;
+
+
+// ============================================================
+// COMMAND BUFFERS
+// ============================================================
+
+String usbCommand = "";
+
+String piCommand = "";
+
+
+// ============================================================
+// IRQ HANDLER
+// ============================================================
+
+void AS3935_ISR()
+{
+  as3935Interrupt = true;
+}
+
+
+// ============================================================
+// COMMAND RESPONSE
+// ============================================================
+//
+// USB command:
+// response only on USB.
+//
+// Raspberry command:
+// response goes back through D6/TX.
+// A copy is also printed on USB for diagnostics.
+// ============================================================
+
+void commandResponse(
+  const String &text,
+  bool fromPi
+)
+{
+  if (fromPi)
+  {
+    Serial1.println(text);
+
+    Serial.print("[PI] ");
+    Serial.println(text);
+  }
+  else
+  {
+    Serial.println(text);
+  }
+}
+
+
+// ============================================================
+// SEND ENVIRONMENT DATA TO PI
+// ============================================================
+
+void sendEnvironment()
+{
+  if (!sht31Online)
+  {
+    return;
+  }
+
+
+  float temperature =
+    sht31.readTemperature();
+
+
+  float humidity =
+    sht31.readHumidity();
+
+
+  if (
+    !isnan(temperature) &&
+    !isnan(humidity)
+  )
+  {
+    Serial1.print(
+      "ENV,T="
+    );
+
+    Serial1.print(
+      temperature,
+      2
+    );
+
+
+    Serial1.print(
+      ",H="
+    );
+
+    Serial1.println(
+      humidity,
+      2
+    );
+  }
+  else
+  {
+    Serial1.println(
+      "ERROR,SHT31_READ"
+    );
+
+
+    Serial.println(
+      "SHT31 read error."
+    );
+  }
+}
+
+
+// ============================================================
+// APPLY AS3935 SETTINGS
+// ============================================================
+
+void applyAS3935Settings()
+{
+  Serial.println(
+    "Applying antenna calibration..."
+  );
+
+
+  lightning.manualCal(
+    as3935Capacitance,
+    as3935Mode,
+    as3935Disturber
+  );
+
+
+  delay(250);
+
+
+  Serial.println(
+    "Applying sensitivity settings..."
+  );
+
+
+  lightning.setNoiseFloorLvl(
+    as3935NoiseFloor
+  );
+
+
+  lightning.setWatchdogThreshold(
+    as3935Watchdog
+  );
+
+
+  lightning.setSpikeRejection(
+    as3935Spike
+  );
+
+
+  delay(250);
+}
+
+
+// ============================================================
+// INITIALIZE AS3935
+// ============================================================
+
+bool initializeAS3935()
+{
+  Serial.println();
+
+  Serial.println(
+    "================================="
+  );
+
+  Serial.println(
+    " AS3935 INITIALIZATION"
+  );
+
+  Serial.println(
+    "================================="
+  );
+
+
+  // ----------------------------------------------------------
+  // Disable IRQ during initialization
+  // ----------------------------------------------------------
+
+  detachInterrupt(
+    digitalPinToInterrupt(
+      AS3935_IRQ_PIN
+    )
+  );
+
+
+  as3935Interrupt =
+    false;
+
+
+  as3935Online =
+    false;
+
+
+  // ----------------------------------------------------------
+  // Detect sensor
+  // ----------------------------------------------------------
+
+  bool detected =
+    false;
+
+
+  for (
+    uint8_t attempt = 1;
+    attempt <= AS3935_MAX_RETRIES;
+    attempt++
+  )
+  {
+    Serial.print(
+      "AS3935 begin attempt "
+    );
+
+
+    Serial.print(
+      attempt
+    );
+
+
+    Serial.print(
+      "/"
+    );
+
+
+    Serial.print(
+      AS3935_MAX_RETRIES
+    );
+
+
+    Serial.print(
+      ": "
+    );
+
+
+    if (
+      lightning.begin() == 0
+    )
+    {
+      Serial.println(
+        "OK"
+      );
+
+
+      detected =
+        true;
+
+
+      break;
+    }
+
+
+    Serial.println(
+      "NOT FOUND"
+    );
+
+
+    Serial1.println(
+      "STATUS,AS3935=OFFLINE"
+    );
+
+
+    delay(
+      AS3935_RETRY_DELAY_MS
+    );
+  }
+
+
+  // ----------------------------------------------------------
+  // Detection failed
+  // ----------------------------------------------------------
+
+  if (!detected)
+  {
+    Serial.println();
+
+
+    Serial.println(
+      "*** AS3935 INITIALIZATION FAILED ***"
+    );
+
+
+    Serial1.println(
+      "STATUS,AS3935=OFFLINE"
+    );
+
+
+    as3935Online =
+      false;
+
+
+    return false;
+  }
+
+
+  // ----------------------------------------------------------
+  // Allow chip to settle
+  // ----------------------------------------------------------
+
+  delay(250);
+
+
+  // ----------------------------------------------------------
+  // Reset registers
+  // ----------------------------------------------------------
+
+  Serial.println(
+    "Applying default configuration..."
+  );
+
+
+  lightning.defInit();
+
+
+  delay(250);
+
+
+  // ----------------------------------------------------------
+  // Apply VIGILIS configuration
+  // ----------------------------------------------------------
+
+  applyAS3935Settings();
+
+
+  // ----------------------------------------------------------
+  // Configure IRQ
+  // ----------------------------------------------------------
+
+  pinMode(
+    AS3935_IRQ_PIN,
+    INPUT
+  );
+
+
+  // Clear/read any pending source before enabling IRQ.
+
+  uint8_t pendingSource =
+    lightning.getInterruptSrc();
+
+
+  Serial.print(
+    "Initial interrupt source: "
+  );
+
+
+  Serial.println(
+    pendingSource
+  );
+
+
+  as3935Interrupt =
+    false;
+
+
+  attachInterrupt(
+    digitalPinToInterrupt(
+      AS3935_IRQ_PIN
+    ),
+    AS3935_ISR,
+    RISING
+  );
+
+
+  // ----------------------------------------------------------
+  // Sensor online
+  // ----------------------------------------------------------
+
+  as3935Online =
+    true;
+
+
+  Serial1.println(
+    "STATUS,AS3935=ONLINE"
+  );
+
+
+  Serial.println();
+
+  Serial.println(
+    "*** AS3935 READY ***"
+  );
+
+  Serial.println();
+
+
+  return true;
+}
+
+
+// ============================================================
+// MACHINE STATUS RESPONSE
+// ============================================================
+
+String buildStatus()
+{
+  String msg =
+    "STATUS,NODE=ONLINE";
+
+
+  msg +=
+    ",SHT31=";
+
+
+  msg +=
+    sht31Online
+      ? "ONLINE"
+      : "OFFLINE";
+
+
+  msg +=
+    ",AS3935=";
+
+
+  msg +=
+    as3935Online
+      ? "ONLINE"
+      : "OFFLINE";
+
+
+  msg +=
+    ",HEATER=";
+
+
+  msg +=
+    sht31Heater
+      ? "ON"
+      : "OFF";
+
+
+  return msg;
+}
+
+
+// ============================================================
+// MACHINE COUNTER RESPONSE
+// ============================================================
+
+String buildCounters()
+{
+  String msg =
+    "COUNTERS,LIGHTNING=";
+
+
+  msg +=
+    String(
+      lightningCount
+    );
+
+
+  msg +=
+    ",EMI=";
+
+
+  msg +=
+    String(
+      emiEventCount
+    );
+
+
+  msg +=
+    ",NOISE=";
+
+
+  msg +=
+    String(
+      noiseCount
+    );
+
+
+  msg +=
+    ",UNKNOWN=";
+
+
+  msg +=
+    String(
+      unknownIrqCount
+    );
+
+
+  return msg;
+}
+
+
+// ============================================================
+// MACHINE AS3935 RESPONSE
+// ============================================================
+
+String buildAS3935Config()
+{
+  String msg =
+    "AS3935,ONLINE=";
+
+
+  msg +=
+    as3935Online
+      ? "1"
+      : "0";
+
+
+  msg +=
+    ",MODE=";
+
+
+  msg +=
+    (
+      as3935Mode ==
+      AS3935_OUTDOORS
+    )
+      ? "OUTDOOR"
+      : "INDOOR";
+
+
+  msg +=
+    ",CAP=";
+
+
+  msg +=
+    String(
+      as3935Capacitance
+    );
+
+
+  msg +=
+    ",NOISE=";
+
+
+  msg +=
+    String(
+      as3935NoiseFloor
+    );
+
+
+  msg +=
+    ",WATCHDOG=";
+
+
+  msg +=
+    String(
+      as3935Watchdog
+    );
+
+
+  msg +=
+    ",SPIKE=";
+
+
+  msg +=
+    String(
+      as3935Spike
+    );
+
+
+  msg +=
+    ",DISTURBER=";
+
+
+  msg +=
+    as3935Disturber
+      ? "ON"
+      : "OFF";
+
+
+  return msg;
+}
+
+
+// ============================================================
+// USB HUMAN-READABLE STATUS
+// ============================================================
+
+void printUSBStatus()
+{
+  Serial.println();
+
+  Serial.println(
+    "================================="
+  );
+
+  Serial.println(
+    " VIGILIS NODE STATUS"
+  );
+
+  Serial.println(
+    "================================="
+  );
+
+
+  Serial.print(
+    "SHT31  : "
+  );
+
+  Serial.println(
+    sht31Online
+      ? "ONLINE"
+      : "OFFLINE"
+  );
+
+
+  Serial.print(
+    "AS3935 : "
+  );
+
+  Serial.println(
+    as3935Online
+      ? "ONLINE"
+      : "OFFLINE"
+  );
+
+
+  Serial.print(
+    "Heater : "
+  );
+
+  Serial.println(
+    sht31Heater
+      ? "ON"
+      : "OFF"
+  );
+
+
+  Serial.println(
+    "================================="
+  );
+
+  Serial.println();
+}
+
+
+// ============================================================
+// USB HUMAN-READABLE COUNTERS
+// ============================================================
+
+void printUSBCounters()
+{
+  Serial.println();
+
+  Serial.println(
+    "================================="
+  );
+
+  Serial.println(
+    " VIGILIS EVENT COUNTERS"
+  );
+
+  Serial.println(
+    "================================="
+  );
+
+
+  Serial.print(
+    "Lightning  : "
+  );
+
+  Serial.println(
+    lightningCount
+  );
+
+
+  Serial.print(
+    "EMI Events : "
+  );
+
+  Serial.println(
+    emiEventCount
+  );
+
+
+  Serial.print(
+    "Noise      : "
+  );
+
+  Serial.println(
+    noiseCount
+  );
+
+
+  Serial.print(
+    "Unknown IRQ: "
+  );
+
+  Serial.println(
+    unknownIrqCount
+  );
+
+
+  Serial.println(
+    "================================="
+  );
+
+  Serial.println();
+}
+
+
+// ============================================================
+// USB HUMAN-READABLE AS3935 CONFIG
+// ============================================================
+
+void printUSBAS3935()
+{
+  Serial.println();
+
+  Serial.println(
+    "================================="
+  );
+
+  Serial.println(
+    " AS3935 CONFIGURATION"
+  );
+
+  Serial.println(
+    "================================="
+  );
+
+
+  Serial.print(
+    "Status      : "
+  );
+
+  Serial.println(
+    as3935Online
+      ? "ONLINE"
+      : "OFFLINE"
+  );
+
+
+  Serial.print(
+    "Mode        : "
+  );
+
+
+  Serial.println(
+    (
+      as3935Mode ==
+      AS3935_OUTDOORS
+    )
+      ? "OUTDOOR"
+      : "INDOOR"
+  );
+
+
+  Serial.print(
+    "Capacitance : "
+  );
+
+  Serial.print(
+    as3935Capacitance
+  );
+
+  Serial.println(
+    " pF"
+  );
+
+
+  Serial.print(
+    "Noise floor : "
+  );
+
+  Serial.println(
+    as3935NoiseFloor
+  );
+
+
+  Serial.print(
+    "Watchdog    : "
+  );
+
+  Serial.println(
+    as3935Watchdog
+  );
+
+
+  Serial.print(
+    "Spike reject: "
+  );
+
+  Serial.println(
+    as3935Spike
+  );
+
+
+  Serial.print(
+    "Disturber   : "
+  );
+
+  Serial.println(
+    as3935Disturber
+      ? "ON"
+      : "OFF"
+  );
+
+
+  Serial.println(
+    "================================="
+  );
+
+  Serial.println();
+}
+
+
+// ============================================================
+// HELP
+// ============================================================
+
+void printHelp()
+{
+  Serial.println();
+
+  Serial.println(
+    "================================="
+  );
+
+  Serial.println(
+    " VIGILIS Outdoor Node V2.1"
+  );
+
+  Serial.println(
+    "================================="
+  );
+
+
+  Serial.println();
+
+  Serial.println(
+    "PING"
+  );
+
+  Serial.println(
+    "GET STATUS"
+  );
+
+  Serial.println(
+    "GET COUNTERS"
+  );
+
+  Serial.println(
+    "GET AS3935"
+  );
+
+
+  Serial.println();
+
+  Serial.println(
+    "SET,AS3935,NOISE=0..7"
+  );
+
+  Serial.println(
+    "SET,AS3935,WATCHDOG=0..15"
+  );
+
+  Serial.println(
+    "SET,AS3935,SPIKE=0..15"
+  );
+
+
+  Serial.println();
+
+  Serial.println(
+    "SET,SHT31,HEATER=ON"
+  );
+
+  Serial.println(
+    "SET,SHT31,HEATER=OFF"
+  );
+
+
+  Serial.println();
+
+  Serial.println(
+    "REINIT AS3935"
+  );
+
+  Serial.println(
+    "RESET COUNTERS"
+  );
+
+
+  Serial.println();
+
+  Serial.println(
+    "TEST LIGHTNING"
+  );
+
+  Serial.println(
+    "TEST EMI"
+  );
+
+  Serial.println(
+    "TEST NOISE"
+  );
+
+
+  Serial.println();
+
+  Serial.println(
+    "================================="
+  );
+
+  Serial.println();
+}
+
+
+// ============================================================
+// COMMAND PROCESSOR
+// ============================================================
+
+void processCommand(
+  String cmd,
+  bool fromPi
+)
+{
+  cmd.trim();
+
+  cmd.toUpperCase();
+
+
+  if (
+    cmd.length() == 0
+  )
+  {
+    return;
+  }
+
+
+  // ==========================================================
+  // PING
+  // ==========================================================
+
+  if (
+    cmd == "PING"
+  )
+  {
+    commandResponse(
+      "PONG",
+      fromPi
+    );
+  }
+
+
+  // ==========================================================
+  // GET STATUS
+  // ==========================================================
+
+  else if (
+    cmd == "GET STATUS" ||
+    cmd == "GET,STATUS"
+  )
+  {
+    if (fromPi)
+    {
+      commandResponse(
+        buildStatus(),
+        true
+      );
+    }
+    else
+    {
+      printUSBStatus();
+    }
+  }
+
+
+  // ==========================================================
+  // GET COUNTERS
+  // ==========================================================
+
+  else if (
+    cmd == "GET COUNTERS" ||
+    cmd == "GET,COUNTERS" ||
+    cmd == "STATS"
+  )
+  {
+    if (fromPi)
+    {
+      commandResponse(
+        buildCounters(),
+        true
+      );
+    }
+    else
+    {
+      printUSBCounters();
+    }
+  }
+
+
+  // ==========================================================
+  // GET AS3935
+  // ==========================================================
+
+  else if (
+    cmd == "GET AS3935" ||
+    cmd == "GET,AS3935"
+  )
+  {
+    if (fromPi)
+    {
+      commandResponse(
+        buildAS3935Config(),
+        true
+      );
+    }
+    else
+    {
+      printUSBAS3935();
+    }
+  }
+
+
+  // ==========================================================
+  // REINITIALIZE AS3935
+  // ==========================================================
+
+  else if (
+    cmd == "REINIT AS3935" ||
+    cmd == "REINIT,AS3935"
+  )
+  {
+    commandResponse(
+      "ACK,AS3935,REINIT",
+      fromPi
+    );
+
+
+    initializeAS3935();
+  }
+
+
+  // ==========================================================
+  // SET NOISE FLOOR
+  // ==========================================================
+
+  else if (
+    cmd.startsWith(
+      "SET,AS3935,NOISE="
+    )
+  )
+  {
+    int value =
+      cmd.substring(
+        strlen(
+          "SET,AS3935,NOISE="
+        )
+      ).toInt();
+
+
+    if (
+      value >= 0 &&
+      value <= 7
+    )
+    {
+      as3935NoiseFloor =
+        (uint8_t)value;
+
+
+      lightning.setNoiseFloorLvl(
+        as3935NoiseFloor
+      );
+
+
+      commandResponse(
+        "ACK,AS3935,NOISE=" +
+        String(
+          as3935NoiseFloor
+        ),
+        fromPi
+      );
+    }
+    else
+    {
+      commandResponse(
+        "ERR,AS3935,NOISE,RANGE",
+        fromPi
+      );
+    }
+  }
+
+
+  // ==========================================================
+  // SET WATCHDOG
+  // ==========================================================
+
+  else if (
+    cmd.startsWith(
+      "SET,AS3935,WATCHDOG="
+    )
+  )
+  {
+    int value =
+      cmd.substring(
+        strlen(
+          "SET,AS3935,WATCHDOG="
+        )
+      ).toInt();
+
+
+    if (
+      value >= 0 &&
+      value <= 15
+    )
+    {
+      as3935Watchdog =
+        (uint8_t)value;
+
+
+      lightning.setWatchdogThreshold(
+        as3935Watchdog
+      );
+
+
+      commandResponse(
+        "ACK,AS3935,WATCHDOG=" +
+        String(
+          as3935Watchdog
+        ),
+        fromPi
+      );
+    }
+    else
+    {
+      commandResponse(
+        "ERR,AS3935,WATCHDOG,RANGE",
+        fromPi
+      );
+    }
+  }
+
+
+  // ==========================================================
+  // SET SPIKE REJECTION
+  // ==========================================================
+
+  else if (
+    cmd.startsWith(
+      "SET,AS3935,SPIKE="
+    )
+  )
+  {
+    int value =
+      cmd.substring(
+        strlen(
+          "SET,AS3935,SPIKE="
+        )
+      ).toInt();
+
+
+    if (
+      value >= 0 &&
+      value <= 15
+    )
+    {
+      as3935Spike =
+        (uint8_t)value;
+
+
+      lightning.setSpikeRejection(
+        as3935Spike
+      );
+
+
+      commandResponse(
+        "ACK,AS3935,SPIKE=" +
+        String(
+          as3935Spike
+        ),
+        fromPi
+      );
+    }
+    else
+    {
+      commandResponse(
+        "ERR,AS3935,SPIKE,RANGE",
+        fromPi
+      );
+    }
+  }
+
+
+  // ==========================================================
+  // SHT31 HEATER ON
+  // ==========================================================
+
+  else if (
+    cmd ==
+    "SET,SHT31,HEATER=ON"
+  )
+  {
+    if (sht31Online)
+    {
+      sht31.heater(
+        true
+      );
+
+
+      sht31Heater =
+        true;
+
+
+      commandResponse(
+        "ACK,SHT31,HEATER=ON",
+        fromPi
+      );
+    }
+    else
+    {
+      commandResponse(
+        "ERR,SHT31,OFFLINE",
+        fromPi
+      );
+    }
+  }
+
+
+  // ==========================================================
+  // SHT31 HEATER OFF
+  // ==========================================================
+
+  else if (
+    cmd ==
+    "SET,SHT31,HEATER=OFF"
+  )
+  {
+    if (sht31Online)
+    {
+      sht31.heater(
+        false
+      );
+
+
+      sht31Heater =
+        false;
+
+
+      commandResponse(
+        "ACK,SHT31,HEATER=OFF",
+        fromPi
+      );
+    }
+    else
+    {
+      commandResponse(
+        "ERR,SHT31,OFFLINE",
+        fromPi
+      );
+    }
+  }
+
+
+  // ==========================================================
+  // TEST LIGHTNING
+  // ==========================================================
+
+  else if (
+    cmd == "TEST LIGHTNING"
+  )
+  {
+    Serial1.println(
+      "LIGHTNING,DIST=12,ENERGY=123456"
+    );
+
+
+    if (!fromPi)
+    {
+      Serial.println(
+        "TEST LIGHTNING sent to Pi."
+      );
+    }
+  }
+
+
+  // ==========================================================
+  // TEST EMI
+  // ==========================================================
+
+  else if (
+    cmd == "TEST EMI"
+  )
+  {
+    Serial1.println(
+      "EMI_EVENT"
+    );
+
+
+    if (!fromPi)
+    {
+      Serial.println(
+        "TEST EMI sent to Pi."
+      );
+    }
+  }
+
+
+  // ==========================================================
+  // TEST NOISE
+  // ==========================================================
+
+  else if (
+    cmd == "TEST NOISE"
+  )
+  {
+    Serial1.println(
+      "NOISE"
+    );
+
+
+    if (!fromPi)
+    {
+      Serial.println(
+        "TEST NOISE sent to Pi."
+      );
+    }
+  }
+
+
+  // ==========================================================
+  // RESET COUNTERS
+  // ==========================================================
+
+  else if (
+    cmd == "RESET COUNTERS" ||
+    cmd == "RESET"
+  )
+  {
+    lightningCount =
+      0;
+
+
+    emiEventCount =
+      0;
+
+
+    noiseCount =
+      0;
+
+
+    unknownIrqCount =
+      0;
+
+
+    commandResponse(
+      "ACK,COUNTERS,RESET",
+      fromPi
+    );
+  }
+
+
+  // ==========================================================
+  // HELP
+  // ==========================================================
+
+  else if (
+    cmd == "HELP"
+  )
+  {
+    if (!fromPi)
+    {
+      printHelp();
+    }
+    else
+    {
+      commandResponse(
+        "ACK,HELP,USB_ONLY",
+        true
+      );
+    }
+  }
+
+
+  // ==========================================================
+  // UNKNOWN COMMAND
+  // ==========================================================
+
+  else
+  {
+    // USB:
+    // Tell us what went wrong.
+    //
+    // Pi/D7:
+    // Silently ignore unknown garbage.
+    //
+    // This prevents a noisy/floating/corrupt RX line from
+    // polluting the normal Meteor data stream.
+
+    if (!fromPi)
+    {
+      Serial.print(
+        "ERR,UNKNOWN_COMMAND: "
+      );
+
+
+      Serial.println(
+        cmd
+      );
+    }
+  }
+}
+
+
+// ============================================================
+// USB COMMAND READER
+// ============================================================
+
+void handleUSBCommands()
+{
+  while (
+    Serial.available()
+  )
+  {
+    char c =
+      Serial.read();
+
+
+    // --------------------------------------------------------
+    // End of command
+    // --------------------------------------------------------
+
+    if (
+      c == '\n' ||
+      c == '\r'
+    )
+    {
+      if (
+        usbCommand.length() > 0
+      )
+      {
+        processCommand(
+          usbCommand,
+          false
+        );
+
+
+        usbCommand =
+          "";
+      }
+
+
+      continue;
+    }
+
+
+    // --------------------------------------------------------
+    // Printable ASCII only
+    // --------------------------------------------------------
+
+    if (
+      c >= 32 &&
+      c <= 126
+    )
+    {
+      usbCommand +=
+        c;
+    }
+
+
+    // --------------------------------------------------------
+    // Overflow protection
+    // --------------------------------------------------------
+
+    if (
+      usbCommand.length() > 120
+    )
+    {
+      usbCommand =
+        "";
+
+
+      Serial.println(
+        "ERR,COMMAND_TOO_LONG"
+      );
+    }
+  }
+}
+
+
+// ============================================================
+// PI / D7 COMMAND READER
+// ============================================================
+
+void handlePiCommands()
+{
+  while (
+    Serial1.available()
+  )
+  {
+    char c =
+      Serial1.read();
+
+
+    // --------------------------------------------------------
+    // Complete command
+    // --------------------------------------------------------
+
+    if (
+      c == '\n' ||
+      c == '\r'
+    )
+    {
+      if (
+        piCommand.length() > 0
+      )
+      {
+        processCommand(
+          piCommand,
+          true
+        );
+
+
+        piCommand =
+          "";
+      }
+
+
+      continue;
+    }
+
+
+    // --------------------------------------------------------
+    // Printable ASCII only
+    // --------------------------------------------------------
+
+    if (
+      c >= 32 &&
+      c <= 126
+    )
+    {
+      piCommand +=
+        c;
+
+
+      // ------------------------------------------------------
+      // Maximum command length
+      // ------------------------------------------------------
+
+      if (
+        piCommand.length() > 120
+      )
+      {
+        // Silently discard garbage.
+        piCommand =
+          "";
+      }
+    }
+    else
+    {
+      // Invalid UART byte.
+      //
+      // Discard partial packet and DO NOT respond.
+      // This prevents garbage-response loops.
+
+      piCommand =
+        "";
+    }
+  }
+}
+
+
+// ============================================================
+// SETUP
+// ============================================================
+
+void setup()
+{
+  // ==========================================================
+  // USB DEBUG
+  // ==========================================================
+
+  Serial.begin(
+    115200
+  );
+
+
+  // ==========================================================
+  // PI UART
+  //
+  // XIAO:
+  // D6 = TX
+  // D7 = RX
+  // ==========================================================
+
+  Serial1.begin(
+    9600
+  );
+
+
+  // Keep RX defined HIGH if Raspberry TX is not connected.
+  //
+  // UART idle state is HIGH.
+
+  pinMode(
+    PI_RX_PIN,
+    INPUT_PULLUP
+  );
+
+
+  // ==========================================================
+  // STARTUP DELAY
+  // ==========================================================
+
+  delay(
+    1500
+  );
+
+
+  Serial.println();
+
+  Serial.println(
+    "================================="
+  );
+
+  Serial.println(
+    " VIGILIS Outdoor Sensor Node"
+  );
+
+  Serial.println(
+    " V2.1"
+  );
+
+  Serial.println(
+    " XIAO SAMD21"
+  );
+
+  Serial.println(
+    "================================="
+  );
+
+
+  Serial.println();
+
+  Serial.println(
+    "D6/TX -> Pi GPIO13 / Pin 33"
+  );
+
+
+  Serial.println(
+    "D7/RX <- Pi GPIO26 / Pin 37"
+  );
+
+
+  Serial.println();
+
+
+  // ==========================================================
+  // I2C
+  // ==========================================================
+
+  Wire.begin();
+
+
+  // ==========================================================
+  // SHT31
+  // ==========================================================
+
+  Serial.print(
+    "SHT31: "
+  );
+
+
+  if (
+    sht31.begin(
+      0x44
+    )
+  )
+  {
+    sht31Online =
+      true;
+
+
+    Serial.println(
+      "OK"
+    );
+
+
+    Serial1.println(
+      "STATUS,SHT31=ONLINE"
+    );
+  }
+  else
+  {
+    sht31Online =
+      false;
+
+
+    Serial.println(
+      "NOT FOUND"
+    );
+
+
+    Serial1.println(
+      "STATUS,SHT31=OFFLINE"
+    );
+  }
+
+
+  // ==========================================================
+  // AS3935 COLD START FIX
+  // ==========================================================
+
+  Serial.println();
+
+
+  Serial.print(
+    "AS3935 power-up delay: "
+  );
+
+
+  Serial.print(
+    AS3935_POWERUP_DELAY_MS
+  );
+
+
+  Serial.println(
+    " ms"
+  );
+
+
+  delay(
+    AS3935_POWERUP_DELAY_MS
+  );
+
+
+  // ==========================================================
+  // INITIALIZE AS3935
+  // ==========================================================
+
+  initializeAS3935();
+
+
+  // ==========================================================
+  // NODE READY
+  // ==========================================================
+
+  Serial.println();
+
+  Serial.println(
+    "================================="
+  );
+
+  Serial.println(
+    " VIGILIS Outdoor Node READY"
+  );
+
+  Serial.println(
+    "================================="
+  );
+
+
+  Serial.println();
+
+  Serial.println(
+    "Type HELP for commands."
+  );
+
+
+  Serial.println();
+
+
+  Serial1.println(
+    "STATUS,NODE=READY"
+  );
+}
+
+
+// ============================================================
+// LOOP
+// ============================================================
+
+void loop()
+{
+  // ==========================================================
+  // COMMAND INPUTS
+  // ==========================================================
+
+  handleUSBCommands();
+
+  handlePiCommands();
+
+
+  // ==========================================================
+  // ENVIRONMENT DATA
+  // ==========================================================
+
+  if (
+    millis() -
+    lastEnvironmentSend
+    >=
+    ENV_INTERVAL
+  )
+  {
+    lastEnvironmentSend =
+      millis();
+
+
+    sendEnvironment();
+  }
+
+
+  // ==========================================================
+  // AS3935 EVENT
+  // ==========================================================
+
+  if (
+    as3935Interrupt &&
+    as3935Online
+  )
+  {
+    as3935Interrupt =
+      false;
+
+
+    // Give interrupt source register time to settle.
+
+    delay(5);
+
+
+    uint8_t source =
+      lightning.getInterruptSrc();
+
+
+    Serial.println();
+
+    Serial.println(
+      ">>>>>>>> IRQ RECEIVED <<<<<<<<"
+    );
+
+
+    Serial.print(
+      "Interrupt source: "
+    );
+
+
+    Serial.println(
+      source
+    );
+
+
+    // ========================================================
+    // LIGHTNING
+    // ========================================================
+
+    if (
+      source == 1
+    )
+    {
+      lightningCount++;
+
+
+      uint8_t distance =
+        lightning.getLightningDistKm();
+
+
+      uint32_t energy =
+        lightning.getStrikeEnergyRaw();
+
+
+      Serial.println();
+
+      Serial.println(
+        "********************************"
+      );
+
+
+      Serial.println(
+        "***     LIGHTNING DETECTED    ***"
+      );
+
+
+      Serial.println(
+        "********************************"
+      );
+
+
+      Serial.print(
+        "Distance: "
+      );
+
+
+      Serial.print(
+        distance
+      );
+
+
+      Serial.println(
+        " km"
+      );
+
+
+      Serial.print(
+        "Energy: "
+      );
+
+
+      Serial.println(
+        energy
+      );
+
+
+      Serial.print(
+        "Lightning count: "
+      );
+
+
+      Serial.println(
+        lightningCount
+      );
+
+
+      // ------------------------------------------------------
+      // Send to Raspberry Pi
+      // ------------------------------------------------------
+
+      Serial1.print(
+        "LIGHTNING,DIST="
+      );
+
+
+      Serial1.print(
+        distance
+      );
+
+
+      Serial1.print(
+        ",ENERGY="
+      );
+
+
+      Serial1.println(
+        energy
+      );
+    }
+
+
+    // ========================================================
+    // EMI / DISTURBER
+    // ========================================================
+
+    else if (
+      source == 2
+    )
+    {
+      emiEventCount++;
+
+
+      Serial.println();
+
+      Serial.println(
+        "*** EMI EVENT ***"
+      );
+
+
+      Serial.print(
+        "EMI Event count: "
+      );
+
+
+      Serial.println(
+        emiEventCount
+      );
+
+
+      Serial1.println(
+        "EMI_EVENT"
+      );
+    }
+
+
+    // ========================================================
+    // NOISE
+    // ========================================================
+
+    else if (
+      source == 3
+    )
+    {
+      noiseCount++;
+
+
+      Serial.println();
+
+      Serial.println(
+        "*** NOISE ***"
+      );
+
+
+      Serial.print(
+        "Noise count: "
+      );
+
+
+      Serial.println(
+        noiseCount
+      );
+
+
+      Serial1.println(
+        "NOISE"
+      );
+    }
+
+
+    // ========================================================
+    // UNKNOWN / SOURCE 0
+    // ========================================================
+
+    else
+    {
+      unknownIrqCount++;
+
+
+      Serial.println();
+
+      Serial.println(
+        "*** UNKNOWN IRQ ***"
+      );
+
+
+      Serial.print(
+        "Raw source: "
+      );
+
+
+      Serial.println(
+        source
+      );
+
+
+      Serial.print(
+        "Unknown IRQ count: "
+      );
+
+
+      Serial.println(
+        unknownIrqCount
+      );
+    }
+
+
+    Serial.println();
+  }
+}
